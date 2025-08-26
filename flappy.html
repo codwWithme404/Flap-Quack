@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flap Quack</title>
+  <style>
+    :root{
+      --bg:#0ea5e9;          /* sky */
+      --ground:#3f3f46;      /* ground strip */
+      --pipe:#16a34a;        /* pipes */
+      --pipe-dark:#15803d;   /* pipe shading */
+      --text:#fff;           /* ui text */
+      --shadow:rgba(0,0,0,.25);
+      --panel:rgba(0,0,0,.35);
+      --gold:#f59e0b;
+    }
+    html,body{
+      height:100%;
+      margin:0;
+      background: radial-gradient(1200px 600px at 30% 20%, #22d3ee 0%, var(--bg) 50%, #0284c7 100%);
+      font-family: ui-sans-serif, -apple-system, Segoe UI, Roboto, system-ui, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      color:var(--text);
+      user-select:none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .wrap{
+      height:100%;
+      display:grid;
+      place-items:center;
+      padding:18px;
+    }
+    .frame{
+      position:relative;
+      width:min(96vw, 480px);
+      aspect-ratio:9/16; /* responsive portrait */
+      background:transparent;
+      border-radius:24px;
+      box-shadow: 0 30px 60px var(--shadow), inset 0 0 0 2px rgba(255,255,255,.08);
+      overflow:hidden;
+    }
+    canvas{ width:100%; height:100%; display:block; background:transparent; }
+
+    .hud{
+      position:absolute; inset:0; pointer-events:none;
+      display:flex; flex-direction:column; align-items:center; justify-content:space-between;
+      padding:14px; 
+    }
+    .topbar{ width:100%; display:flex; justify-content:space-between; align-items:center; }
+    .chip{ background:var(--panel); backdrop-filter: blur(6px); border-radius:14px; padding:8px 12px; box-shadow: 0 6px 16px var(--shadow); font-weight:700; }
+    .btns{ display:flex; gap:8px; }
+    .btn{ pointer-events:all; cursor:pointer; border:none; border-radius:14px; padding:8px 12px; font-weight:700; color:var(--text); background:rgba(255,255,255,.12); box-shadow: 0 6px 16px var(--shadow); }
+    .btn:active{ transform: translateY(1px); }
+
+    .center{
+      position:absolute; inset:0; display:grid; place-items:center; pointer-events:none;
+    }
+    .panel{
+      background:var(--panel); backdrop-filter: blur(8px);
+      border-radius:20px; padding:18px 20px; text-align:center; box-shadow: 0 16px 40px var(--shadow);
+      max-width: 85%;
+    }
+    .title{ font-size:clamp(24px, 6vw, 40px); font-weight:900; letter-spacing:.5px; text-shadow:0 3px 0 rgba(0,0,0,.2); }
+    .subtitle{ opacity:.9; margin-top:6px; }
+    .kbr{ display:inline-block; padding:.15em .5em; border-radius:8px; background:rgba(255,255,255,.18); font-weight:800; }
+
+    .bottom-hint{ opacity:.8; font-size:12px; }
+
+    /* tiny toast for mobile tip */
+    .toast{ position:absolute; left:50%; bottom:12px; transform:translateX(-50%); background:var(--panel); padding:8px 12px; border-radius:12px; font-size:12px; box-shadow:0 6px 16px var(--shadow); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="frame" id="frame">
+      <canvas id="game" width="450" height="800" aria-label="Flap Quack game canvas"></canvas>
+
+      <div class="hud">
+        <div class="topbar">
+          <div class="chip" id="score">0</div>
+          <div class="btns">
+            <button class="btn" id="pauseBtn" aria-label="Pause/Resume">⏯</button>
+            <button class="btn" id="restartBtn" aria-label="Restart">↻</button>
+          </div>
+        </div>
+        <div class="bottom-hint">Tap / Click / Space to flap • Avoid pipes</div>
+      </div>
+
+      <div class="center" id="startOverlay">
+        <div class="panel">
+          <div class="title">🦆 Flap Quack</div>
+          <div class="subtitle">Tap / click / <span class="kbr">SPACE</span> to start and flap</div>
+          <div style="margin-top:10px; font-weight:700;">High Score: <span id="hiStart">0</span></div>
+        </div>
+      </div>
+
+      <div class="center" id="gameOver" style="display:none;">
+        <div class="panel">
+          <div class="title">Game Over</div>
+          <div class="subtitle">Score: <span id="finalScore">0</span> • Best: <span id="hiEnd">0</span></div>
+          <div style="margin-top:10px; font-size:14px; opacity:.9;">Press <span class="kbr">SPACE</span> or tap to try again</div>
+        </div>
+      </div>
+
+      <div class="toast" id="toast" style="display:none;">Tip: you can also press SPACE</div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  const cvs = document.getElementById('game');
+  const ctx = cvs.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const restartBtn = document.getElementById('restartBtn');
+  const startOverlay = document.getElementById('startOverlay');
+  const gameOverEl = document.getElementById('gameOver');
+  const finalScoreEl = document.getElementById('finalScore');
+  const hiStartEl = document.getElementById('hiStart');
+  const hiEndEl   = document.getElementById('hiEnd');
+  const toast = document.getElementById('toast');
+
+  const W = cvs.width; const H = cvs.height; 
+
+  // Game state
+  let started=false, paused=false, over=false;
+  let score=0, highScore= Number(localStorage.getItem('flapquack-hiscore')||0);
+  hiStartEl.textContent = highScore;
+
+  // World params
+  const GRAVITY = 0.45;          // pull
+  const FLAP_VY = -8.0;          // impulse
+  const PIPE_GAP = 150;          // hole height
+  let pipeSpeed = 2.4;           // base speed
+  const PIPE_W = 70;             // pipe width
+  const PIPE_SPACING = 240;      // distance between pipes
+  const MAX_ROT = 0.7;           // duck tilt cap (rad)
+
+  // Ground strip
+  const GROUND_H = 90;
+
+  // Duck
+  const duck = { x: W*0.28, y: H*0.42, r: 18, vy: 0, rot: 0 };
+
+  // Pipe list
+  /** each pipe = {x, top, bottom, scored} */
+  const pipes = [];
+
+  // Background clouds for parallax
+  const clouds = Array.from({length:6}, ()=>({
+    x: Math.random()*W, y: Math.random()*H*0.5, s: 0.3 + Math.random()*0.7, w: 60+Math.random()*120
+  }));
+
+  function reset(){
+    score=0; scoreEl.textContent=0; over=false; paused=false; started=false;
+    duck.y=H*0.42; duck.vy=0; duck.rot=0;
+    pipes.length=0; pipeSpeed=2.4;
+    spawnPipe(W+200); // preload a couple
+    spawnPipe(W+200+PIPE_SPACING);
+    startOverlay.style.display='grid';
+    gameOverEl.style.display='none';
+  }
+
+  function start(){
+    if (started || over) return;
+    started=true; paused=false; duck.vy=FLAP_VY; // initial hop
+    startOverlay.style.display='none';
+  }
+
+  function gameOver(){
+    over=true; started=false; paused=false;
+    finalScoreEl.textContent = score;
+    if(score>highScore){ highScore=score; localStorage.setItem('flapquack-hiscore', highScore); }
+    hiEndEl.textContent = highScore;
+    gameOverEl.style.display='grid';
+  }
+
+  function flap(){
+    if(!started){ start(); }
+    if(over){ reset(); start(); return; }
+    if(paused) return;
+    duck.vy = FLAP_VY;
+  }
+
+  function togglePause(){ if(!started || over) return; paused=!paused; }
+
+  function spawnPipe(x){
+    // randomize hole position, keep within margins
+    const marginTop = 40; const marginBottom = 120 + GROUND_H;
+    const holeY = marginTop + PIPE_GAP/2 + Math.random()*(H - marginTop - marginBottom - PIPE_GAP);
+    const topEnd = holeY - PIPE_GAP/2;
+    const botStart = holeY + PIPE_GAP/2;
+    pipes.push({ x, top: topEnd, bottom: botStart, scored:false });
+  }
+
+  function update(){
+    if(!paused && started && !over){
+      // difficulty ramp
+      pipeSpeed += 0.0004; 
+
+      // duck physics
+      duck.vy += GRAVITY;
+      duck.y  += duck.vy;
+      duck.rot = Math.max(-MAX_ROT, Math.min(MAX_ROT, duck.vy/10));
+
+      // move pipes + spawn new ones
+      for(const p of pipes){ p.x -= pipeSpeed; }
+      if(pipes.length===0 || pipes[pipes.length-1].x < W - PIPE_SPACING){
+        spawnPipe(W + Math.random()*80);
+      }
+      // remove offscreen pipes
+      while(pipes.length && pipes[0].x + PIPE_W < 0){ pipes.shift(); }
+
+      // scoring & collisions
+      const dLeft = duck.x - duck.r, dRight = duck.x + duck.r,
+            dTop = duck.y - duck.r,  dBot = duck.y + duck.r;
+
+      for(const p of pipes){
+        // score when passing pipe center
+        if(!p.scored && p.x + PIPE_W < duck.x){
+          p.scored = true; score++; scoreEl.textContent = score;
+        }
+        // collision with pipe rectangles
+        if(dRight > p.x && dLeft < p.x + PIPE_W){
+          if(dTop < p.top || dBot > p.bottom){ gameOver(); }
+        }
+      }
+      // ground & ceiling
+      if(duck.y + duck.r > H - GROUND_H || duck.y - duck.r < 0){ gameOver(); }
+    }
+  }
+
+  // Drawing helpers
+  function drawBackground(){
+    // sky is in CSS; here draw distant hills & clouds
+    // hills
+    ctx.fillStyle = '#22c55e22';
+    ctx.beginPath();
+    ctx.ellipse(W*0.25, H*0.9, 220, 60, 0, 0, Math.PI*2); ctx.fill();
+    ctx.ellipse(W*0.75, H*0.92, 260, 70, 0, 0, Math.PI*2); ctx.fill();
+
+    // clouds
+    clouds.forEach(c=>{
+      c.x -= c.s*0.3; if(c.x < -c.w-40){ c.x=W+40; c.y=Math.random()*H*0.5; }
+      ctx.fillStyle='rgba(255,255,255,.85)';
+      pill(c.x, c.y, c.w, 30);
+      pill(c.x+c.w*0.35, c.y-12, c.w*0.6, 34);
+      pill(c.x-c.w*0.25, c.y-8, c.w*0.5, 28);
+    });
+  }
+
+  function pill(x,y,w,h){
+    const r = Math.min(h/2, w/2);
+    ctx.beginPath();
+    ctx.moveTo(x-r, y-h/2);
+    ctx.arcTo(x+w/2, y-h/2, x+w/2, y+h/2, r);
+    ctx.arcTo(x+w/2, y+h/2, x-r, y+h/2, r);
+    ctx.arcTo(x-r, y+h/2, x-r, y-h/2, r);
+    ctx.arcTo(x-r, y-h/2, x+w/2, y-h/2, r);
+    ctx.fill();
+  }
+
+  function drawPipes(){
+    for(const p of pipes){
+      // pipe columns
+      ctx.fillStyle = getPipeGradient();
+      // top pipe
+      ctx.fillRect(p.x, 0, PIPE_W, p.top);
+      // bottom pipe
+      ctx.fillRect(p.x, p.bottom, PIPE_W, H - p.bottom - GROUND_H);
+
+      // pipe rims
+      ctx.fillStyle = getPipeDark();
+      ctx.fillRect(p.x-4, p.top-24, PIPE_W+8, 24);
+      ctx.fillRect(p.x-4, p.bottom, PIPE_W+8, 24);
+    }
+  }
+
+  function getPipeGradient(){
+    const g = ctx.createLinearGradient(0,0,PIPE_W,0);
+    g.addColorStop(0, '#34d399');
+    g.addColorStop(0.5, '#22c55e');
+    g.addColorStop(1, '#16a34a');
+    return g;
+  }
+  function getPipeDark(){ return '#065f46'; }
+
+  function drawGround(){
+    // scrolling ground pattern
+    const t = performance.now()/1000;
+    const offset = (t*pipeSpeed*20)%40;
+
+    ctx.fillStyle = '#0c4a6e';
+    ctx.fillRect(0, H-GROUND_H, W, GROUND_H);
+
+    ctx.fillStyle = '#164e63';
+    for(let x=-40+offset; x<W; x+=40){ ctx.fillRect(x, H-GROUND_H+50, 30, 12); }
+
+    // a top lip
+    ctx.fillStyle = 'rgba(255,255,255,.2)';
+    ctx.fillRect(0, H-GROUND_H, W, 3);
+  }
+
+  function drawDuck(){
+    ctx.save();
+    ctx.translate(duck.x, duck.y);
+    ctx.rotate(duck.rot);
+
+    // body
+    ctx.fillStyle = '#facc15';
+    ctx.beginPath(); ctx.ellipse(0, 0, duck.r*1.1, duck.r*0.9, 0, 0, Math.PI*2); ctx.fill();
+
+    // wing (flap animation)
+    const flap = Math.sin(performance.now()/100) * 6;
+    ctx.fillStyle = '#eab308';
+    ctx.beginPath(); ctx.ellipse(-4, -2+flap*0.2, duck.r*0.7, duck.r*0.45, -0.5, 0, Math.PI*2); ctx.fill();
+
+    // head
+    ctx.fillStyle = '#fde047';
+    ctx.beginPath(); ctx.ellipse(duck.r*0.8, -duck.r*0.2, duck.r*0.6, duck.r*0.55, 0, 0, Math.PI*2); ctx.fill();
+
+    // beak
+    ctx.fillStyle = '#fb923c';
+    ctx.beginPath();
+    ctx.moveTo(duck.r*1.5, -duck.r*0.2);
+    ctx.quadraticCurveTo(duck.r*1.95, -duck.r*0.05, duck.r*1.4, duck.r*0.15);
+    ctx.closePath(); ctx.fill();
+
+    // eye
+    ctx.fillStyle = '#111827';
+    ctx.beginPath(); ctx.arc(duck.r*1.1, -duck.r*0.32, 2.6, 0, Math.PI*2); ctx.fill();
+
+    ctx.restore();
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    drawBackground();
+    drawPipes();
+    drawDuck();
+    drawGround();
+  }
+
+  function loop(){
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // Controls
+  function isTouch(){ return ('ontouchstart' in window) || navigator.maxTouchPoints>0; }
+  if(isTouch()){
+    toast.style.display='block';
+    setTimeout(()=>toast.style.display='none', 2200);
+  }
+
+  window.addEventListener('pointerdown', (e)=>{ if(e.pointerType==='mouse' && e.button!==0) return; flap(); });
+  window.addEventListener('keydown', (e)=>{
+    if(e.code==='Space'){ e.preventDefault(); flap(); }
+    if(e.code==='KeyP'){ togglePause(); }
+  });
+  pauseBtn.addEventListener('click', ()=> togglePause());
+  restartBtn.addEventListener('click', ()=>{ reset(); start(); });
+
+  // Start
+  reset();
+  loop();
+})();
+</script>
+</body>
+</html>
